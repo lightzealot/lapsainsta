@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>TeleInsta — Dashboard</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:24px}
+    label{display:block;margin-top:12px}
+    input,button,textarea{font-size:14px;padding:8px;width:100%;box-sizing:border-box}
+    button{width:auto;margin-top:12px}
+    pre{background:#f4f4f4;padding:12px;overflow:auto}
+  </style>
+</head>
+<body>
+  <h1>TeleInsta — Dashboard</h1>
+  <p>Prueba la función que recibe un enlace de Instagram y envía el video a Telegram.</p>
+
+  <div>
+    <label>Instagram URL
+      <input id="instagram_url" placeholder="https://www.instagram.com/p/POST_ID/" />
+    </label>
+    <label>Telegram chat id
+      <input id="telegram_chat_id" placeholder="-1001234567890" />
+    </label>
+    <button id="sendBtn">Enviar a Telegram</button>
+  </div>
+
+  <h3>Respuesta</h3>
+  <pre id="output">—</pre>
+
+  <h3>Health</h3>
+  <pre id="health">—</pre>
+
+  <script>
+    const sendBtn = document.getElementById('sendBtn');
+    const out = document.getElementById('output');
+    const health = document.getElementById('health');
+
+    async function checkHealth(){
+      try{
+        const r = await fetch('/.netlify/functions/health');
+        const j = await r.json();
+        health.textContent = JSON.stringify(j, null, 2);
+      }catch(e){ health.textContent = 'Error: '+e.message }
+    }
+
+    sendBtn.addEventListener('click', async ()=>{
+      out.textContent = 'Enviando...';
+      const instagram_url = document.getElementById('instagram_url').value.trim();
+      const telegram_chat_id = document.getElementById('telegram_chat_id').value.trim();
+      if(!instagram_url || !telegram_chat_id){ out.textContent = 'Rellena ambos campos'; return }
+      try{
+        const r = await fetch('/.netlify/functions/receive', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ instagram_url, telegram_chat_id })
+        });
+        const text = await r.text();
+        try{ out.textContent = JSON.stringify(JSON.parse(text), null, 2) }catch(e){ out.textContent = text }
+      }catch(e){ out.textContent = 'Error: '+e.message }
+      checkHealth();
+    });
+
+    checkHealth();
+  </script>
+</body>
+</html>
