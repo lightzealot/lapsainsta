@@ -5,7 +5,14 @@ const path = require('path');
 const FormData = require('form-data');
 
 async function downloadToFile(url, destPath) {
-  const resp = await axios.get(url, { responseType: 'stream', timeout: 30000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+  let resp;
+  try {
+    resp = await axios.get(url, { responseType: 'stream', timeout: 30000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+  } catch (err) {
+    const status = err.response && err.response.status;
+    const data = err.response && err.response.data;
+    throw new Error(`Failed to download ${url} — status: ${status || 'N/A'} — ${err.message} ${data ? JSON.stringify(data).slice(0,200) : ''}`);
+  }
   const writer = fs.createWriteStream(destPath);
   return new Promise((resolve, reject) => {
     resp.data.pipe(writer);
@@ -56,11 +63,24 @@ exports.handler = async (event) => {
   }
 
   try {
+    // helper to call telegram and provide better errors
+    async function tg(method, payload) {
+      try {
+        const res = await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`, payload, { timeout: 20000 });
+        return res;
+      } catch (e) {
+        const status = e.response && e.response.status;
+        const body = e.response && e.response.data;
+        const hint = status === 404 ? '404 from Telegram — likely invalid bot token' : (status === 401 ? '401 Unauthorized from Telegram — check token' : `status ${status}`);
+        const msg = `Telegram API error (${hint}): ${e.message} ${body ? JSON.stringify(body).slice(0,200) : ''}`;
+        // log for Netlify
+        console.error(msg);
+        throw new Error(msg);
+      }
+    }
+
     // Notify: starting
-    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      chat_id: telegram_chat_id,
-      text: 'Recibido enlace de Instagram. Iniciando descarga...'
-    });
+    await tg('sendMessage', { chat_id: telegram_chat_id, text: 'Recibido enlace de Instagram. Iniciando descarga...' });
 
     const resp = await axios.get(instagram_url, {
       headers: {
@@ -86,41 +106,40 @@ exports.handler = async (event) => {
 
     // Always download first, send progress messages to chat
     const tmpFile = path.join(os.tmpdir(), `insta_video_${Date.now()}.mp4`);
-    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      chat_id: telegram_chat_id,
-      text: 'Extrayendo URL de video pública...'
-    });
+    await tg('sendMessage', { chat_id: telegram_chat_id, text: 'Extrayendo URL de video pública...' });
 
     await downloadToFile(videoUrl, tmpFile);
 
     // Notify downloaded
-    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      chat_id: telegram_chat_id,
-      text: 'Descarga completada. Subiendo a Telegram...'
-    });
+    await tg('sendMessage', { chat_id: telegram_chat_id, text: 'Descarga completada. Subiendo a Telegram...' });
 
     const form = new FormData();
     form.append('chat_id', telegram_chat_id);
     form.append('video', fs.createReadStream(tmpFile));
 
-    const sendResp = await axios.post(
-      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo`,
-      form,
-      { headers: form.getHeaders(), maxContentLength: Infinity, maxBodyLength: Infinity, timeout: 60000 }
-    );
+    let sendResp;
+    try {
+      sendResp = await axios.post(
+        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo`,
+        form,
+        { headers: form.getHeaders(), maxContentLength: Infinity, maxBodyLength: Infinity, timeout: 60000 }
+      );
+    } catch (e) {
+      const status = e.response && e.response.status;
+      const body = e.response && e.response.data;
+      throw new Error(`Failed to send video to Telegram — status: ${status || 'N/A'} — ${e.message} ${body ? JSON.stringify(body).slice(0,200) : ''}`);
+    }
 
     // cleanup
     try { fs.unlinkSync(tmpFile); } catch (e) {}
 
     // Notify success
-    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      chat_id: telegram_chat_id,
-      text: 'Video enviado correctamente ✅'
-    });
+    await tg('sendMessage', { chat_id: telegram_chat_id, text: 'Video enviado correctamente ✅' });
 
     return { statusCode: 200, body: JSON.stringify({ ok: true, method: 'download-and-upload', telegram: sendResp.data }) };
   } catch (err) {
     const message = err && err.message ? err.message : String(err);
+    console.error('Handler error:', message);
     // Try to notify the chat about the error
     try {
       await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
@@ -128,7 +147,7 @@ exports.handler = async (event) => {
         text: `Error procesando el enlace: ${message}`
       });
     } catch (notifyErr) {
-      // ignore notify errors
+      console.error('Failed to notify chat about the error:', notifyErr && notifyErr.message);
     }
     return { statusCode: 500, body: `Error interno: ${message}` };
   }
