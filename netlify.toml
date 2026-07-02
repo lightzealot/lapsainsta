@@ -1,0 +1,12 @@
+[build]
+  publish = "."
+
+[[redirects]]
+  from = "/dashboard"
+  to = "/dashboard/"
+  status = 200
+
+[[redirects]]
+  from = "/dashboard/"
+  to = "/dashboard/index.html"
+  status = 200
