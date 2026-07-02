@@ -1,0 +1,13 @@
+{
+  "name": "teleinsta-netlify-bot",
+  "version": "0.1.0",
+  "description": "Netlify function to fetch Instagram video and send to Telegram group",
+  "main": "netlify/functions/receive.js",
+  "scripts": {
+    "start": "netlify dev"
+  },
+  "dependencies": {
+    "axios": "^1.5.0",
+    "form-data": "^4.0.0"
+  }
+}
