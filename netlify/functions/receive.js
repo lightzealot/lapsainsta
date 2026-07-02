@@ -33,7 +33,19 @@ exports.handler = async (event) => {
     return { statusCode: 400, body: 'Invalid JSON body' };
   }
 
-  const { instagram_url, telegram_chat_id } = body;
+  // Support two modes:
+  // 1) Direct API POST { instagram_url, telegram_chat_id }
+  // 2) Telegram webhook payload (update) -> extract message.text and chat.id
+  let instagram_url = body.instagram_url;
+  let telegram_chat_id = body.telegram_chat_id;
+
+  if (!instagram_url && body.message && body.message.text) {
+    const text = body.message.text;
+    const urlMatch = text.match(/https?:\/\/[^\s]+instagram\.com[^\s]*/i) || text.match(/https?:\/\/[^\s]*instagr\.am[^\s]*/i);
+    if (urlMatch) instagram_url = urlMatch[0];
+    telegram_chat_id = (body.message.chat && body.message.chat.id) || (body.message.from && body.message.from.id);
+  }
+
   if (!instagram_url || !telegram_chat_id) {
     return { statusCode: 400, body: 'Missing instagram_url or telegram_chat_id' };
   }
@@ -44,6 +56,12 @@ exports.handler = async (event) => {
   }
 
   try {
+    // Notify: starting
+    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      chat_id: telegram_chat_id,
+      text: 'Recibido enlace de Instagram. Iniciando descarga...'
+    });
+
     const resp = await axios.get(instagram_url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; NetlifyFunction/1.0)'
@@ -66,48 +84,52 @@ exports.handler = async (event) => {
     let videoUrl = match[1];
     videoUrl = videoUrl.replace(/\\\//g, '/').replace(/&amp;/g, '&');
 
-    // First try: let Telegram fetch the remote URL
-    try {
-      const tgResp = await axios.post(
-        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo`,
-        {
-          chat_id: telegram_chat_id,
-          video: videoUrl
-        },
-        { headers: { 'Content-Type': 'application/json' }, timeout: 20000 }
-      );
+    // Always download first, send progress messages to chat
+    const tmpFile = path.join(os.tmpdir(), `insta_video_${Date.now()}.mp4`);
+    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      chat_id: telegram_chat_id,
+      text: 'Extrayendo URL de video pública...'
+    });
 
-      return {
-        statusCode: 200,
-        body: JSON.stringify({ ok: true, method: 'url', telegram: tgResp.data })
-      };
-    } catch (outerErr) {
-      // If sending by URL fails (e.g., Telegram can't fetch), download and send file
-      try {
-        const tmpFile = path.join(os.tmpdir(), `insta_video_${Date.now()}.mp4`);
-        await downloadToFile(videoUrl, tmpFile);
+    await downloadToFile(videoUrl, tmpFile);
 
-        const form = new FormData();
-        form.append('chat_id', telegram_chat_id);
-        form.append('video', fs.createReadStream(tmpFile));
+    // Notify downloaded
+    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      chat_id: telegram_chat_id,
+      text: 'Descarga completada. Subiendo a Telegram...'
+    });
 
-        const sendResp = await axios.post(
-          `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo`,
-          form,
-          { headers: form.getHeaders(), maxContentLength: Infinity, maxBodyLength: Infinity, timeout: 60000 }
-        );
+    const form = new FormData();
+    form.append('chat_id', telegram_chat_id);
+    form.append('video', fs.createReadStream(tmpFile));
 
-        // cleanup
-        try { fs.unlinkSync(tmpFile); } catch (e) {}
+    const sendResp = await axios.post(
+      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo`,
+      form,
+      { headers: form.getHeaders(), maxContentLength: Infinity, maxBodyLength: Infinity, timeout: 60000 }
+    );
 
-        return { statusCode: 200, body: JSON.stringify({ ok: true, method: 'upload', telegram: sendResp.data }) };
-      } catch (innerErr) {
-        const message = innerErr && innerErr.message ? innerErr.message : String(innerErr);
-        return { statusCode: 500, body: `Error enviando video a Telegram: ${message}` };
-      }
-    }
+    // cleanup
+    try { fs.unlinkSync(tmpFile); } catch (e) {}
+
+    // Notify success
+    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      chat_id: telegram_chat_id,
+      text: 'Video enviado correctamente ✅'
+    });
+
+    return { statusCode: 200, body: JSON.stringify({ ok: true, method: 'download-and-upload', telegram: sendResp.data }) };
   } catch (err) {
     const message = err && err.message ? err.message : String(err);
+    // Try to notify the chat about the error
+    try {
+      await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        chat_id: telegram_chat_id,
+        text: `Error procesando el enlace: ${message}`
+      });
+    } catch (notifyErr) {
+      // ignore notify errors
+    }
     return { statusCode: 500, body: `Error interno: ${message}` };
   }
 };
